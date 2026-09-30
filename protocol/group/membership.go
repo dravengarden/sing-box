@@ -31,6 +31,10 @@ type MembershipUpdate struct {
 	// Fallback is used only if a selector's current member is removed. Empty
 	// selects its configured default (or first member when no default exists).
 	Fallback string
+	// URLTest fallbacks are independently checked for network support and used
+	// only when the previous selection is removed or no longer supports it.
+	FallbackTCP string
+	FallbackUDP string
 }
 
 type membershipChange struct {
@@ -44,6 +48,8 @@ type membershipChange struct {
 	byTag        map[string]adapter.Outbound
 	tags         []string
 	fallback     string
+	fallbackTCP  string
+	fallbackUDP  string
 	dependencies *common.TypedValue[[]string]
 
 	oldMembers []adapter.Outbound
@@ -89,7 +95,7 @@ func PrepareMembership(updates []MembershipUpdate) (*MembershipTransaction, erro
 			return nil, ErrMembershipInvalid
 		}
 		seen[update.Group.Tag()] = true
-		change := &membershipChange{tag: update.Group.Tag(), members: slices.Clone(update.Members), byTag: make(map[string]adapter.Outbound), fallback: update.Fallback}
+		change := &membershipChange{tag: update.Group.Tag(), members: slices.Clone(update.Members), byTag: make(map[string]adapter.Outbound), fallback: update.Fallback, fallbackTCP: update.FallbackTCP, fallbackUDP: update.FallbackUDP}
 		for _, member := range change.members {
 			if member == nil || member.Tag() == "" || change.byTag[member.Tag()] != nil {
 				return nil, ErrMembershipInvalid
@@ -102,6 +108,9 @@ func PrepareMembership(updates []MembershipUpdate) (*MembershipTransaction, erro
 		}
 		switch group := update.Group.(type) {
 		case *Selector:
+			if update.FallbackTCP != "" || update.FallbackUDP != "" {
+				return nil, ErrMembershipInvalid
+			}
 			change.selector, change.access, change.revision = group, &group.membershipAccess, &group.membershipRevision
 			change.dependencies = &group.dependencyTags
 		case *URLTest:
@@ -154,6 +163,11 @@ func (change *membershipChange) validateLocked() bool {
 		}
 	} else {
 		previous = change.urltest.outbounds
+		for network, tag := range map[string]string{N.NetworkTCP: change.fallbackTCP, N.NetworkUDP: change.fallbackUDP} {
+			if tag != "" && (change.byTag[tag] == nil || !slices.Contains(change.byTag[tag].Network(), network)) {
+				return false
+			}
+		}
 	}
 	for _, member := range previous {
 		if _, nested := member.(adapter.OutboundGroup); nested {
@@ -241,10 +255,16 @@ func (transaction *MembershipTransaction) Commit(ctx context.Context) error {
 			group.selectedOutboundTCP = retainedMember(change.byTag, change.oldTCP, N.NetworkTCP)
 			group.selectedOutboundUDP = retainedMember(change.byTag, change.oldUDP, N.NetworkUDP)
 			if group.selectedOutboundTCP == nil {
-				group.selectedOutboundTCP, _ = group.selectLocked(N.NetworkTCP)
+				group.selectedOutboundTCP = change.byTag[change.fallbackTCP]
+				if group.selectedOutboundTCP == nil {
+					group.selectedOutboundTCP, _ = group.selectLocked(N.NetworkTCP)
+				}
 			}
 			if group.selectedOutboundUDP == nil {
-				group.selectedOutboundUDP, _ = group.selectLocked(N.NetworkUDP)
+				group.selectedOutboundUDP = change.byTag[change.fallbackUDP]
+				if group.selectedOutboundUDP == nil {
+					group.selectedOutboundUDP, _ = group.selectLocked(N.NetworkUDP)
+				}
 			}
 		}
 		change.dependencies.Store(change.tags)
