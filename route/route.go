@@ -148,11 +148,12 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	if selectedRule == nil {
 		selectedOutbound = r.outbound.Default()
 	}
-	chain, err := resolveOutbound(selectedOutbound, N.NetworkTCP)
+	chain, releaseLease, err := resolveRoutedOutbound(selectedOutbound, N.NetworkTCP)
 	if err != nil {
 		buf.ReleaseMulti(buffers)
 		return err
 	}
+	onClose = N.AppendClose(onClose, func(error) { releaseLease() })
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
@@ -192,6 +193,47 @@ func resolveOutbound(outbound adapter.Outbound, network string) ([]adapter.Outbo
 		return nil, E.New(strings.ToUpper(network), " is not supported by outbound: ", outbound.Tag())
 	}
 	return chain, nil
+}
+
+// resolveRoutedOutbound resolves like resolveOutbound for a connection that
+// will be dialed. Lease-aware groups pin the selected member under their
+// membership lock; the returned release must run once the connection closes.
+func resolveRoutedOutbound(outbound adapter.Outbound, network string) ([]adapter.Outbound, func(), error) {
+	chain := []adapter.Outbound{outbound}
+	var releases []func()
+	release := func() {
+		for _, done := range releases {
+			done()
+		}
+	}
+	for {
+		group, isGroup := outbound.(adapter.OutboundGroup)
+		if !isGroup {
+			break
+		}
+		if leaseGroup, isLeaseGroup := group.(adapter.OutboundGroupWithDialerLease); isLeaseGroup {
+			var done func()
+			var err error
+			outbound, done, err = leaseGroup.SelectedWithDialerLease(network)
+			if err != nil {
+				release()
+				return nil, nil, E.Cause(err, "select member of outbound: ", group.Tag())
+			}
+			releases = append(releases, done)
+		} else {
+			outbound = group.Selected(network)
+		}
+		if outbound == nil {
+			release()
+			return nil, nil, E.New(strings.ToUpper(network), " is not supported by outbound: ", group.Tag())
+		}
+		chain = append(chain, outbound)
+	}
+	if !common.Contains(outbound.Network(), network) {
+		release()
+		return nil, nil, E.New(strings.ToUpper(network), " is not supported by outbound: ", outbound.Tag())
+	}
+	return chain, release, nil
 }
 
 func registerInterrupt(chain []adapter.Outbound, closer io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
@@ -313,11 +355,12 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	if selectedRule == nil || selectReturn {
 		selectedOutbound = r.outbound.Default()
 	}
-	chain, err := resolveOutbound(selectedOutbound, N.NetworkUDP)
+	chain, releaseLease, err := resolveRoutedOutbound(selectedOutbound, N.NetworkUDP)
 	if err != nil {
 		N.ReleaseMultiPacketBuffer(packetBuffers)
 		return err
 	}
+	onClose = N.AppendClose(onClose, func(error) { releaseLease() })
 	for _, buffer := range packetBuffers {
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
 		N.PutPacketBuffer(buffer)

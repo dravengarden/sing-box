@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -26,8 +27,9 @@ func RegisterSelector(registry *outbound.Registry) {
 }
 
 var (
-	_ adapter.OutboundGroup = (*Selector)(nil)
-	_ adapter.Referrer      = (*Selector)(nil)
+	_ adapter.OutboundGroup                = (*Selector)(nil)
+	_ adapter.OutboundGroupWithDialerLease = (*Selector)(nil)
+	_ adapter.Referrer                     = (*Selector)(nil)
 )
 
 type Selector struct {
@@ -42,6 +44,9 @@ type Selector struct {
 	history                      *urltest.HistoryStorage
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
+	membershipAccess             sync.RWMutex
+	membershipRevision           uint64
+	dependencyTags               common.TypedValue[[]string]
 }
 
 func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SelectorOutboundOptions) (adapter.Outbound, error) {
@@ -65,10 +70,13 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, E.New("duplicate tag: ", tag)
 		}
 	}
+	outbound.dependencyTags.Store(slices.Clone(options.Outbounds))
 	return outbound, nil
 }
 
 func (s *Selector) Network() []string {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	selected := s.selected.Load()
 	if selected == nil {
 		return []string{N.NetworkTCP, N.NetworkUDP}
@@ -80,6 +88,8 @@ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	s.membershipAccess.Lock()
+	defer s.membershipAccess.Unlock()
 	for i, tag := range s.tags {
 		detour, loaded := s.outbound.Outbound(tag)
 		if !loaded {
@@ -116,11 +126,27 @@ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 }
 
 func (s *Selector) All() []string {
-	return s.tags
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
+	return slices.Clone(s.tags)
+}
+
+func (s *Selector) Dependencies() []string {
+	return slices.Clone(s.dependencyTags.Load())
 }
 
 func (s *Selector) Selected(network string) adapter.Outbound {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	return s.selected.Load()
+}
+
+// SelectedWithDialerLease pins the selected member under the membership lock
+// so a concurrent membership commit cannot retire it before the routed dial.
+func (s *Selector) SelectedWithDialerLease(network string) (adapter.Outbound, func(), error) {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
+	return leaseSelectedMember(s.selected.Load())
 }
 
 func (s *Selector) AttachConnection(closer io.Closer) func() {
@@ -128,6 +154,8 @@ func (s *Selector) AttachConnection(closer io.Closer) func() {
 }
 
 func (s *Selector) References() []string {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	selected := s.selected.Load()
 	if selected == nil {
 		return s.tags[:1]
@@ -136,6 +164,8 @@ func (s *Selector) References() []string {
 }
 
 func (s *Selector) SelectOutbound(tag string) bool {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	detour, loaded := s.outbounds[tag]
 	if !loaded {
 		return false
@@ -160,7 +190,14 @@ func (s *Selector) SelectOutbound(tag string) bool {
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
+	s.membershipAccess.RLock()
+	dialer, release, err := acquireMembershipDialer(s.selected.Load())
+	s.membershipAccess.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	conn, err := dialer.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +205,14 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
+	s.membershipAccess.RLock()
+	dialer, release, err := acquireMembershipDialer(s.selected.Load())
+	s.membershipAccess.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	conn, err := dialer.ListenPacket(ctx, destination)
 	if err != nil {
 		return nil, err
 	}
