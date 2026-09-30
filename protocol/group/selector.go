@@ -3,6 +3,8 @@ package group
 import (
 	"context"
 	"net"
+	"slices"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -42,6 +44,9 @@ type Selector struct {
 	history                      *urltest.HistoryStorage
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
+	membershipAccess             sync.RWMutex
+	membershipRevision           uint64
+	dependencyTags               common.TypedValue[[]string]
 }
 
 func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SelectorOutboundOptions) (adapter.Outbound, error) {
@@ -61,10 +66,13 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
+	outbound.dependencyTags.Store(slices.Clone(options.Outbounds))
 	return outbound, nil
 }
 
 func (s *Selector) Network() []string {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	selected := s.selected.Load()
 	if selected == nil {
 		return []string{N.NetworkTCP, N.NetworkUDP}
@@ -73,6 +81,8 @@ func (s *Selector) Network() []string {
 }
 
 func (s *Selector) Start() error {
+	s.membershipAccess.Lock()
+	defer s.membershipAccess.Unlock()
 	for i, tag := range s.tags {
 		detour, loaded := s.outbound.Outbound(tag)
 		if !loaded {
@@ -109,6 +119,8 @@ func (s *Selector) Start() error {
 }
 
 func (s *Selector) Now() string {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	selected := s.selected.Load()
 	if selected == nil {
 		return s.tags[0]
@@ -117,10 +129,18 @@ func (s *Selector) Now() string {
 }
 
 func (s *Selector) All() []string {
-	return s.tags
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
+	return slices.Clone(s.tags)
+}
+
+func (s *Selector) Dependencies() []string {
+	return slices.Clone(s.dependencyTags.Load())
 }
 
 func (s *Selector) SelectOutbound(tag string) bool {
+	s.membershipAccess.RLock()
+	defer s.membershipAccess.RUnlock()
 	detour, loaded := s.outbounds[tag]
 	if !loaded {
 		return false
@@ -145,7 +165,14 @@ func (s *Selector) SelectOutbound(tag string) bool {
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
+	s.membershipAccess.RLock()
+	dialer, release, err := acquireMembershipDialer(s.selected.Load())
+	s.membershipAccess.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	conn, err := dialer.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +180,14 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
+	s.membershipAccess.RLock()
+	dialer, release, err := acquireMembershipDialer(s.selected.Load())
+	s.membershipAccess.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	conn, err := dialer.ListenPacket(ctx, destination)
 	if err != nil {
 		return nil, err
 	}

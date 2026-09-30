@@ -31,6 +31,16 @@ type OutboundWithMultiplex interface {
 	MultiplexEnabled() bool
 }
 
+// OutboundWithDialerLease pins a leaf across group selection and a dial. The
+// acquisition must not perform network I/O or call group/manager methods.
+// Release is called after DialContext/ListenPacket returns; implementations
+// separately retain successful flows until their connections close. A lease
+// permits the in-flight dial even if the leaf is concurrently retired.
+type OutboundWithDialerLease interface {
+	Outbound
+	AcquireDialer() (N.Dialer, func(), error)
+}
+
 type FlowOutbound interface {
 	Outbound
 	tun.Port

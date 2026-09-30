@@ -722,10 +722,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	if isURLTest {
 		go urlTest.CheckOutbounds()
 	} else if isOutboundGroup {
-		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
-			itOutbound, _ := boxService.outboundManager.Outbound(it)
-			return itOutbound
-		}))
+		outbounds := []adapter.Outbound{outboundGroup}
 		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
 	} else {
 		go func() {

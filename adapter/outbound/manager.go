@@ -272,6 +272,7 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
 			err = adapter.LegacyStart(outbound, stage)
 			done()
 			if err != nil {
+				_ = common.Close(outbound)
 				return E.Cause(err, stage, " ", name)
 			}
 		}
