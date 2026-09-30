@@ -233,6 +233,41 @@ func TestMembershipReplacementRevalidatesNetworkSupport(t *testing.T) {
 	}
 }
 
+func TestMembershipURLTestUsesVerifiedFallbackWithoutPreemption(t *testing.T) {
+	_, probe, members := membershipTestGroups(t)
+	transaction, err := PrepareMembership([]MembershipUpdate{{Group: probe, Members: members[1:], FallbackTCP: "c", FallbackUDP: "c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if probe.group.selectedOutboundTCP != members[2] || probe.group.selectedOutboundUDP != members[2] {
+		t.Fatal("stale history overrode the verified fallback")
+	}
+	transaction.Release()
+	restore, err := PrepareMembership([]MembershipUpdate{{Group: probe, Members: members, FallbackTCP: "b", FallbackUDP: "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restore.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if probe.group.selectedOutboundTCP != members[2] || probe.group.selectedOutboundUDP != members[2] {
+		t.Fatal("fallback preempted a retained selection")
+	}
+	if err := restore.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if probe.group.selectedOutboundTCP != members[2] {
+		t.Fatal("rollback lost previous URLTest selection")
+	}
+	tcpOnly := &membershipTestLeaf{outbound.NewAdapter("direct", "tcp-only", []string{"tcp"}, nil)}
+	if _, err := PrepareMembership([]MembershipUpdate{{Group: probe, Members: []adapter.Outbound{tcpOnly, members[1]}, FallbackUDP: "tcp-only"}}); !errors.Is(err, ErrMembershipInvalid) {
+		t.Fatal("unsupported UDP fallback was accepted")
+	}
+}
+
 type membershipReentrantLeaf struct {
 	*membershipTestLeaf
 	check func()
