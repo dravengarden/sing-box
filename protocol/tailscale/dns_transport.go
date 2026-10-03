@@ -404,7 +404,7 @@ func (t *DNSTransport) exchangeWithSearchDomains(ctx context.Context, message *m
 	searchDomains := t.domains.searchDomains
 	t.access.RUnlock()
 	if len(searchDomains) == 0 {
-		callback(nil, dns.RcodeNameError)
+		callback(negativeHostResponse(message, mDNS.RcodeNameError), nil)
 		return
 	}
 	originalQuestion := message.Question[0]
@@ -439,6 +439,34 @@ func restoreOriginalQuestion(response *mDNS.Msg, expandedName string, originalQu
 			rr.Header().Name = originalQuestion.Name
 		}
 	}
+	for _, rr := range response.Ns {
+		if strings.EqualFold(rr.Header().Name, expandedName) {
+			rr.Header().Name = originalQuestion.Name
+		}
+	}
+}
+
+// Match Tailscale's resolver negative TTL. Without an RFC 2308 SOA, a stub
+// can retain startup NXDOMAIN after the live control map starts serving the
+// name. These synthetic SOA fields are not a separately delegated DNS zone.
+const negativeHostTTL uint32 = 10
+
+func boundNegativeHostCache(response *mDNS.Msg) *mDNS.Msg {
+	if len(response.Question) != 1 || len(response.Answer) != 0 ||
+		(response.Rcode != mDNS.RcodeNameError && response.Rcode != mDNS.RcodeSuccess) {
+		return response
+	}
+	name := response.Question[0].Name
+	response.Ns = append(response.Ns, &mDNS.SOA{
+		Hdr: mDNS.RR_Header{Name: name, Rrtype: mDNS.TypeSOA, Class: mDNS.ClassINET, Ttl: negativeHostTTL},
+		Ns:  name, Mbox: name, Serial: 1,
+		Refresh: negativeHostTTL, Retry: negativeHostTTL, Expire: negativeHostTTL, Minttl: negativeHostTTL,
+	})
+	return response
+}
+
+func negativeHostResponse(message *mDNS.Msg, rcode int) *mDNS.Msg {
+	return boundNegativeHostCache(dns.FixedResponseStatus(message, rcode))
 }
 
 func (t *DNSTransport) exchangeOnce(ctx context.Context, message *mDNS.Msg, allowDefaultResolvers bool, callback func(response *mDNS.Msg, err error)) {
@@ -456,9 +484,9 @@ func (t *DNSTransport) exchangeOnce(ctx context.Context, message *mDNS.Msg, allo
 	if hostsLoaded {
 		switch question.Qtype {
 		case mDNS.TypeA, mDNS.TypeAAAA:
-			callback(dns.FixedResponse(message.Id, question, addresses, C.DefaultDNSTTL), nil)
+			callback(boundNegativeHostCache(dns.FixedResponse(message.Id, question, addresses, C.DefaultDNSTTL)), nil)
 		default:
-			callback(dns.FixedResponseStatus(message, mDNS.RcodeSuccess), nil)
+			callback(negativeHostResponse(message, mDNS.RcodeSuccess), nil)
 		}
 		return
 	}
@@ -468,14 +496,7 @@ func (t *DNSTransport) exchangeOnce(ctx context.Context, message *mDNS.Msg, allo
 		return
 	}
 	if routeSuffix != "" {
-		callback(&mDNS.Msg{
-			MsgHdr: mDNS.MsgHdr{
-				Id:       message.Id,
-				Rcode:    mDNS.RcodeNameError,
-				Response: true,
-			},
-			Question: []mDNS.Question{question},
-		}, nil)
+		callback(negativeHostResponse(message, mDNS.RcodeNameError), nil)
 		return
 	}
 	if allowDefaultResolvers {
@@ -486,7 +507,7 @@ func (t *DNSTransport) exchangeOnce(ctx context.Context, message *mDNS.Msg, allo
 		}
 		return
 	}
-	callback(nil, dns.RcodeNameError)
+	callback(negativeHostResponse(message, mDNS.RcodeNameError), nil)
 }
 
 func lookupHosts(hosts map[string][]netip.Addr, magicHosts nDNSResolver.MagicDNSHosts, name string) ([]netip.Addr, bool) {
