@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -128,7 +129,7 @@ type Endpoint struct {
 	keyAuth             bool
 	serverStarted       bool
 	started             atomic.Bool
-	systemTun           tun.Tun
+	systemTun           io.Closer
 	systemDialer        *dialer.DefaultDialer
 	fallbackTCPCloser   func()
 }
@@ -342,7 +343,10 @@ func (t *Endpoint) start() error {
 			_ = systemTun.Close()
 			return err
 		}
-		t.systemTun = systemTun
+		// tsnet closes this adapter when its server stops. Retain the same
+		// idempotent closer for endpoint and failed-start cleanup; closing the
+		// underlying Darwin TUN twice panics in its stop pipe.
+		t.systemTun = wgTunDevice
 		t.systemDialer = systemDialer
 		t.server.Tun = wgTunDevice
 	}
