@@ -60,6 +60,9 @@ func (a *tunDeviceAdapter) Read(bufs [][]byte, sizes []int, offset int) (count i
 				a.debugPacket("read", bufs[i][offset:offset+sizes[i]])
 			}
 		}
+		if errors.Is(err, singTun.ErrTooManySegments) {
+			err = wgTun.ErrTooManySegments
+		}
 		return n, err
 	}
 	if offset < singTun.PacketOffset {
