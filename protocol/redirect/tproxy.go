@@ -2,6 +2,7 @@ package redirect
 
 import (
 	"context"
+	"math"
 	"net"
 	"net/netip"
 	"time"
@@ -21,6 +22,11 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 )
+
+// tproxyMaxDatagramSize covers every UDP payload IPv4 or IPv6 can carry without
+// jumbograms. Applications behind a transparent proxy did not choose to be
+// proxied, so the engine's smaller default must not truncate their datagrams.
+const tproxyMaxDatagramSize = math.MaxUint16
 
 func RegisterTProxy(registry *inbound.Registry) {
 	inbound.Register[option.TProxyInboundOptions](registry, C.TypeTProxy, NewTProxy)
@@ -66,6 +72,7 @@ func NewTProxy(ctx context.Context, router adapter.Router, logger log.ContextLog
 		ConnectionHandler: tproxy,
 		OOBPacketHandler:  tproxy,
 		TProxy:            true,
+		UDPReadBufferSize: tproxyMaxDatagramSize,
 	})
 	return tproxy, nil
 }
@@ -142,6 +149,16 @@ type tproxyPacketWriter struct {
 	source      netip.AddrPort
 	destination M.Socksaddr
 	conn        *net.UDPConn
+}
+
+// ReaderMTU and WriterMTU size the buffers the packet copy allocates in each
+// direction. The NAT connection exposes this writer as its upstream.
+func (w *tproxyPacketWriter) ReaderMTU() int {
+	return tproxyMaxDatagramSize
+}
+
+func (w *tproxyPacketWriter) WriterMTU() int {
+	return tproxyMaxDatagramSize
 }
 
 func (w *tproxyPacketWriter) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {

@@ -102,6 +102,13 @@ func (l *Listener) PacketWriter() N.PacketWriter {
 	return (*packetWriter)(l)
 }
 
+func (l *Listener) newPacketBuffer() *buf.Buffer {
+	if l.udpReadBufferSize > 0 {
+		return buf.NewSize(l.udpReadBufferSize)
+	}
+	return buf.NewPacket()
+}
+
 func (l *Listener) loopUDPIn() {
 	defer close(l.packetOutboundClosed)
 	if l.oobPacketHandler == nil {
@@ -115,7 +122,7 @@ func (l *Listener) loopUDPIn() {
 	}
 	var buffer *buf.Buffer
 	if !l.threadUnsafePacketWriter {
-		buffer = buf.NewPacket()
+		buffer = l.newPacketBuffer()
 		defer buffer.Release()
 		buffer.IncRef()
 		defer buffer.DecRef()
@@ -124,7 +131,7 @@ func (l *Listener) loopUDPIn() {
 		oob := make([]byte, 1024)
 		for {
 			if l.threadUnsafePacketWriter {
-				buffer = buf.NewPacket()
+				buffer = l.newPacketBuffer()
 			} else {
 				buffer.Reset()
 			}
@@ -146,7 +153,7 @@ func (l *Listener) loopUDPIn() {
 	} else {
 		for {
 			if l.threadUnsafePacketWriter {
-				buffer = buf.NewPacket()
+				buffer = l.newPacketBuffer()
 			} else {
 				buffer.Reset()
 			}

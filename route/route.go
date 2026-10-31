@@ -814,7 +814,7 @@ func (r *Router) actionSniff(
 		packetBuffers = inputPacketBuffers
 		for {
 			var (
-				sniffBuffer = buf.NewPacket()
+				sniffBuffer = newSniffPacketBuffer(inputPacketConn)
 				destination M.Socksaddr
 				done        = make(chan struct{})
 			)
@@ -893,6 +893,16 @@ func (r *Router) actionSniff(
 		}
 	}
 	return
+}
+
+// newSniffPacketBuffer honors a size the connection declares above the default,
+// because the sniffed packet is forwarded and a short read truncates it.
+func newSniffPacketBuffer(conn N.PacketConn) *buf.Buffer {
+	mtu := N.CalculateMTU(conn, conn)
+	if mtu > buf.UDPBufferSize {
+		return buf.NewSize(mtu)
+	}
+	return buf.NewPacket()
 }
 
 func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve) error {
