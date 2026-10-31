@@ -842,6 +842,7 @@ func (r *Router) actionSniff(
 					return
 				}
 			} else {
+				sniffBuffer = compactSniffPacketBuffer(sniffBuffer)
 				if quicMoreData() {
 					err = sniff.PeekPacket(
 						ctx,
@@ -903,6 +904,18 @@ func newSniffPacketBuffer(conn N.PacketConn) *buf.Buffer {
 		return buf.NewSize(mtu)
 	}
 	return buf.NewPacket()
+}
+
+// compactSniffPacketBuffer drops the spare capacity of an enlarged read buffer,
+// because sniffing a fragmented QUIC client hello caches every packet it reads.
+func compactSniffPacketBuffer(buffer *buf.Buffer) *buf.Buffer {
+	if buffer.Cap() <= buf.UDPBufferSize {
+		return buffer
+	}
+	compact := buf.NewSize(buffer.Len())
+	common.Must1(compact.Write(buffer.Bytes()))
+	buffer.Release()
+	return compact
 }
 
 func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve) error {
