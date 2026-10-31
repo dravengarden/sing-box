@@ -34,6 +34,7 @@ type Listener struct {
 	setSystemProxy           bool
 	systemProxySOCKS         bool
 	tproxy                   bool
+	udpReadBufferSize        int
 
 	tcpListener          net.Listener
 	systemProxy          settings.SystemProxy
@@ -57,6 +58,9 @@ type Options struct {
 	SetSystemProxy           bool
 	SystemProxySOCKS         bool
 	TProxy                   bool
+	// UDPReadBufferSize replaces the engine's default datagram read buffer,
+	// which truncates anything longer. Zero keeps the default.
+	UDPReadBufferSize int
 }
 
 func New(
@@ -75,6 +79,7 @@ func New(
 		setSystemProxy:           options.SetSystemProxy,
 		systemProxySOCKS:         options.SystemProxySOCKS,
 		tproxy:                   options.TProxy,
+		udpReadBufferSize:        options.UDPReadBufferSize,
 	}
 }
 
