@@ -346,12 +346,11 @@ func (t *Endpoint) start(scope *adapter.Scope) error {
 		if err != nil {
 			return err
 		}
-		scope.Add(systemTun.Close)
-		err = systemTun.Start()
+		wgTunDevice, err := newScopedTunDevice(scope, systemTun, int(mtu), t.logger)
 		if err != nil {
 			return err
 		}
-		wgTunDevice, err := newTunDeviceAdapter(systemTun, int(mtu), t.logger)
+		err = systemTun.Start()
 		if err != nil {
 			return err
 		}
